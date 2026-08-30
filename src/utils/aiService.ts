@@ -84,52 +84,68 @@ export function fileToBase64(file: File): Promise<{ base64: string; mimeType: st
  */
 export function compressFileToBase64(
   file: File,
-  maxWidth = 900,
-  quality = 0.65
+  maxWidth = 1000,
+  quality = 0.70
 ): Promise<{ base64: string; mimeType: string }> {
-  return new Promise((resolve, reject) => {
-    if (file.type === 'application/pdf') {
+  return new Promise((resolve) => {
+    // 1. PDF handler
+    if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
       const reader = new FileReader();
       reader.onload = (e) => {
-        const result = e.target?.result as string;
-        const base64 = result.split(',')[1];
-        resolve({ base64, mimeType: file.type });
+        const result = (e.target?.result as string) || '';
+        const base64 = result.includes(',') ? result.split(',')[1] : result;
+        resolve({ base64, mimeType: 'application/pdf' });
       };
-      reader.onerror = reject;
+      reader.onerror = () => {
+        fileToBase64(file).then(resolve).catch(() => resolve({ base64: '', mimeType: 'application/pdf' }));
+      };
       reader.readAsDataURL(file);
       return;
     }
 
-    const img = new Image();
+    // 2. Image compression with canvas, with direct file reader fallback
     const reader = new FileReader();
-
     reader.onload = (e) => {
-      img.src = e.target?.result as string;
+      const rawDataUrl = (e.target?.result as string) || '';
+      const img = new Image();
       img.onload = () => {
-        let width = img.naturalWidth || img.width;
-        let height = img.naturalHeight || img.height;
+        try {
+          let width = img.naturalWidth || img.width || 800;
+          let height = img.naturalHeight || img.height || 600;
 
-        if (width > maxWidth) {
-          height = Math.round((height * maxWidth) / width);
-          width = maxWidth;
+          if (width > maxWidth) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'medium';
+            ctx.drawImage(img, 0, 0, width, height);
+          }
+
+          const dataUrl = canvas.toDataURL('image/jpeg', quality);
+          const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+          resolve({ base64, mimeType: 'image/jpeg' });
+        } catch {
+          // Fallback if canvas manipulation encounters memory/security limitation on mobile
+          const base64 = rawDataUrl.includes(',') ? rawDataUrl.split(',')[1] : rawDataUrl;
+          resolve({ base64, mimeType: file.type || 'image/jpeg' });
         }
-
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.imageSmoothingEnabled = true;
-          ctx.imageSmoothingQuality = 'medium';
-          ctx.drawImage(img, 0, 0, width, height);
-        }
-
-        const dataUrl = canvas.toDataURL('image/jpeg', quality);
-        resolve({ base64: dataUrl.split(',')[1], mimeType: 'image/jpeg' });
       };
-      img.onerror = reject;
+      img.onerror = () => {
+        const base64 = rawDataUrl.includes(',') ? rawDataUrl.split(',')[1] : rawDataUrl;
+        resolve({ base64, mimeType: file.type || 'image/jpeg' });
+      };
+      img.src = rawDataUrl;
     };
-    reader.onerror = reject;
+    reader.onerror = () => {
+      fileToBase64(file).then(resolve).catch(() => resolve({ base64: '', mimeType: file.type || 'image/jpeg' }));
+    };
     reader.readAsDataURL(file);
   });
 }

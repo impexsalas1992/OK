@@ -338,6 +338,27 @@ function getStableId(item: any, prefix: string, idx: number): string {
   return `${prefix}_row_${idx}_${date || Date.now()}`;
 }
 
+export function cleanDriveFileUrl(rawUrl?: any): string | undefined {
+  if (!rawUrl) return undefined;
+  let str = String(rawUrl).trim();
+  if (!str) return undefined;
+
+  // Check if spreadsheet formula e.g. =HYPERLINK("https://...", "...")
+  const hyperlinkMatch = str.match(/=HYPERLINK\s*\(\s*["']([^"']+)["']/i);
+  if (hyperlinkMatch && hyperlinkMatch[1]) {
+    str = hyperlinkMatch[1].trim();
+  }
+
+  // Remove surrounding quotes if any
+  str = str.replace(/^["']|["']$/g, '').trim();
+
+  // If it's a direct URL or Drive ID
+  if (str.startsWith('http://') || str.startsWith('https://') || /^[a-zA-Z0-9_-]{20,}$/.test(str)) {
+    return str;
+  }
+  return undefined;
+}
+
 function normalizeSaleItem(item: any, idx: number): SaleItem {
   let base = parseNumber(item.base ?? item.baseAmount);
   let igv = parseNumber(item.igv ?? item.igvAmount);
@@ -391,7 +412,7 @@ function normalizeSaleItem(item: any, idx: number): SaleItem {
     netPay,
     cost,
     paymentMethod: String(item.paymentMethod || 'Contado').trim(),
-    fileUrl: item.fileUrl ? String(item.fileUrl).trim() : undefined,
+    fileUrl: cleanDriveFileUrl(item.fileUrl),
     fileName: item.fileName ? String(item.fileName).trim() : undefined,
     fileDrivePath: item.fileDrivePath ? String(item.fileDrivePath).trim() : undefined,
   };
@@ -450,7 +471,7 @@ function normalizeExpenseItem(item: any, idx: number): ExpenseItem {
     retention4th,
     netPay,
     paymentMethod: String(item.paymentMethod || 'Contado').trim(),
-    fileUrl: item.fileUrl ? String(item.fileUrl).trim() : undefined,
+    fileUrl: cleanDriveFileUrl(item.fileUrl),
     fileName: item.fileName ? String(item.fileName).trim() : undefined,
     fileDrivePath: item.fileDrivePath ? String(item.fileDrivePath).trim() : undefined,
   };

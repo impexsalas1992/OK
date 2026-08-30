@@ -151,7 +151,18 @@ async function startServer() {
   // Helper: Extract Google Drive File ID from URL
   function extractDriveFileId(urlOrId?: string): string | null {
     if (!urlOrId) return null;
-    const trimmed = String(urlOrId).trim();
+    let trimmed = String(urlOrId).trim();
+
+    // 1. Spreadsheet formulas like =HYPERLINK("https://drive.google.com/file/d/...", "...")
+    const hyperlinkMatch = trimmed.match(/=HYPERLINK\s*\(\s*["']([^"']+)["']/i);
+    if (hyperlinkMatch && hyperlinkMatch[1]) {
+      trimmed = hyperlinkMatch[1].trim();
+    }
+
+    // 2. Remove surrounding quotes and clean
+    trimmed = trimmed.replace(/^["']|["']$/g, '').trim();
+
+    // 3. Various Google Drive URL formats
     const m1 = trimmed.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
     if (m1 && m1[1]) return m1[1];
     const m2 = trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
@@ -160,6 +171,8 @@ async function startServer() {
     if (m3 && m3[1]) return m3[1];
     const m4 = trimmed.match(/\/thumbnail\?id=([a-zA-Z0-9_-]+)/);
     if (m4 && m4[1]) return m4[1];
+    const m5 = trimmed.match(/id=([a-zA-Z0-9_-]{20,})/);
+    if (m5 && m5[1]) return m5[1];
     if (/^[a-zA-Z0-9_-]{20,}$/.test(trimmed)) return trimmed;
     return null;
   }
