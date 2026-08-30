@@ -997,9 +997,9 @@ function handleRequest(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
 
-    // ACCIÓN: Obtener archivo en base64 desde Google Drive por ID o enlace
-    if (action === "get_file_base64" && postData) {
-      output = handleGetFileBase64(postData);
+    // ACCIÓN: Obtener archivo en base64 desde Google Drive por ID o enlace (soporta POST y GET)
+    if (action === "get_file_base64") {
+      output = handleGetFileBase64(postData, e ? e.parameter : null);
       return ContentService.createTextOutput(JSON.stringify(output))
         .setMimeType(ContentService.MimeType.JSON);
     }
@@ -1118,15 +1118,17 @@ function handleVoucherUpload(data) {
   };
 }
 
-function handleGetFileBase64(data) {
-  var fileId = data.fileId;
-  if (!fileId && data.fileUrl) {
-    var str = String(data.fileUrl);
-    var match = str.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || str.match(/[?&]id=([a-zA-Z0-9_-]+)/) || str.match(/\/d\/([a-zA-Z0-9_-]+)/);
+function handleGetFileBase64(data, params) {
+  var fileId = (data && data.fileId) || (params && params.fileId);
+  var fileUrl = (data && data.fileUrl) || (params && params.fileUrl);
+  if (!fileId && fileUrl) {
+    var str = String(fileUrl);
+    var match = str.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || str.match(/[?&]id=([a-zA-Z0-9_-]+)/) || str.match(/\/d\/([a-zA-Z0-9_-]+)/) || str.match(/id=([a-zA-Z0-9_-]{20,})/);
     if (match && match[1]) fileId = match[1];
+    else if (/^[a-zA-Z0-9_-]{20,}$/.test(str.trim())) fileId = str.trim();
   }
   if (!fileId) {
-    return { success: false, error: "No se proporcionó ID de archivo de Google Drive" };
+    return { success: false, error: "No se proporcionó ID o enlace de archivo de Google Drive" };
   }
   try {
     var file = DriveApp.getFileById(fileId);
@@ -1141,7 +1143,7 @@ function handleGetFileBase64(data) {
       base64: base64
     };
   } catch (err) {
-    return { success: false, error: "Error al leer archivo de Drive: " + err.toString() };
+    return { success: false, error: "Error al leer archivo de Drive (" + fileId + "): " + err.toString() };
   }
 }
 

@@ -1,5 +1,32 @@
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
-import { getCompanyName } from './googleSheetsSync';
+import { getCompanyName, getAppsScriptUrl, DEFAULT_APPSCRIPT_URL } from './googleSheetsSync';
+
+// In-memory cache for uploaded / processed vouchers base64 across tabs
+const clientFileBase64Cache = new Map<string, { base64: string; mimeType: string; fileName?: string }>();
+
+export function cacheFileBase64(key: string, base64: string, mimeType: string = 'image/jpeg', fileName?: string): void {
+  if (!key || !base64) return;
+  const cleanKey = key.trim();
+  clientFileBase64Cache.set(cleanKey, { base64, mimeType, fileName });
+  // Also extract Drive ID if applicable and cache by ID
+  const match = cleanKey.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || cleanKey.match(/[?&]id=([a-zA-Z0-9_-]+)/) || cleanKey.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if (match && match[1]) {
+    clientFileBase64Cache.set(match[1], { base64, mimeType, fileName });
+  }
+}
+
+export function getCachedFileBase64(key?: string): { base64: string; mimeType: string; fileName?: string } | null {
+  if (!key) return null;
+  const cleanKey = key.trim();
+  if (clientFileBase64Cache.has(cleanKey)) {
+    return clientFileBase64Cache.get(cleanKey)!;
+  }
+  const match = cleanKey.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || cleanKey.match(/[?&]id=([a-zA-Z0-9_-]+)/) || cleanKey.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if (match && match[1] && clientFileBase64Cache.has(match[1])) {
+    return clientFileBase64Cache.get(match[1])!;
+  }
+  return null;
+}
 
 export interface VoucherAnalysisResult {
   date?: string;
@@ -204,18 +231,30 @@ export async function analyzeVoucherWithAI(
   let base64: string | undefined;
   let mimeType: string | undefined;
   let fileUrl: string | undefined;
+  let fileName: string | undefined;
 
   if (fileOrPayload instanceof File) {
     const compressed = await compressFileToBase64(fileOrPayload, 850, 0.65);
     base64 = compressed.base64;
     mimeType = compressed.mimeType;
+    fileName = fileOrPayload.name;
   } else {
     base64 = fileOrPayload.base64;
     mimeType = fileOrPayload.mimeType;
     fileUrl = fileOrPayload.fileUrl;
+    fileName = fileOrPayload.fileName;
   }
 
-  // Check client memory cache if fileUrl is available
+  // Check fast local memory base64 cache if base64 is missing
+  if (!base64 && fileUrl) {
+    const cachedFile = getCachedFileBase64(fileUrl);
+    if (cachedFile && cachedFile.base64) {
+      base64 = cachedFile.base64;
+      mimeType = cachedFile.mimeType || mimeType;
+    }
+  }
+
+  // Check client memory cache for previously analyzed results
   const cacheKey = fileUrl || (base64 ? base64.slice(0, 100) : '');
   if (cacheKey && clientVoucherCache.has(cacheKey)) {
     const cached = clientVoucherCache.get(cacheKey)!;
@@ -225,9 +264,10 @@ export async function analyzeVoucherWithAI(
     clientVoucherCache.delete(cacheKey);
   }
 
+  const effectiveScriptUrl = (appsScriptUrl || getAppsScriptUrl() || DEFAULT_APPSCRIPT_URL).trim();
   const cleanClientKey = normalizeGeminiApiKey(clientApiKey);
 
-  // 1. Try server route first (can fetch directly from Google Drive if fileUrl is supplied)
+  // 1. Try server route first (server can fetch directly from Google Drive and Apps Script)
   try {
     const res = await fetch('/api/gemini/analyze-voucher', {
       method: 'POST',
@@ -236,7 +276,7 @@ export async function analyzeVoucherWithAI(
         fileBase64: base64,
         mimeType: mimeType || 'application/pdf',
         fileUrl,
-        appsScriptUrl,
+        appsScriptUrl: effectiveScriptUrl,
         type,
         apiKey: cleanClientKey,
         model: selectedModel
@@ -248,7 +288,7 @@ export async function analyzeVoucherWithAI(
       if (result.text) {
         const parsed = cleanAndParseJson(result.text);
         if (cacheKey && parsed && Object.keys(parsed).length > 0) {
-          clientVoucherCache.set(cacheKey, { data: parsed, expiry: Date.now() + 5 * 60 * 1000 });
+          clientVoucherCache.set(cacheKey, { data: parsed, expiry: Date.now() + 10 * 60 * 1000 });
         }
         return parsed;
       }
@@ -262,28 +302,54 @@ export async function analyzeVoucherWithAI(
     console.warn('Server endpoint error, attempting client-side fallback:', serverErr);
   }
 
-  // If base64 wasn't available and server failed, try resolving base64 from Drive first
+  // If base64 wasn't available and server route didn't complete, try resolving base64
   if (!base64 && fileUrl) {
+    // 2. Try server route to fetch base64 from Drive
     try {
       const driveFetchRes = await fetch('/api/drive/fetch-file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileUrl, appsScriptUrl })
+        body: JSON.stringify({ fileUrl, appsScriptUrl: effectiveScriptUrl })
       });
       if (driveFetchRes.ok) {
         const driveData = await driveFetchRes.json();
         if (driveData && driveData.base64) {
           base64 = driveData.base64;
           mimeType = driveData.mimeType || 'application/pdf';
+          cacheFileBase64(fileUrl, base64, mimeType, fileName);
         }
       }
     } catch (e) {
-      console.warn('Could not fetch file from Drive for client-side fallback:', e);
+      console.warn('Could not fetch file from /api/drive/fetch-file:', e);
+    }
+
+    // 3. Try client-side direct request to Apps Script Web App (GET / POST)
+    if (!base64 && effectiveScriptUrl) {
+      try {
+        const match = fileUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || fileUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/) || fileUrl.match(/\/d\/([a-zA-Z0-9_-]+)/);
+        const fileId = match && match[1] ? match[1] : fileUrl;
+        const scriptGetUrl = `${effectiveScriptUrl}${effectiveScriptUrl.includes('?') ? '&' : '?'}action=get_file_base64&fileId=${encodeURIComponent(fileId)}`;
+        const directScriptRes = await fetch(scriptGetUrl, { method: 'GET', headers: { 'Accept': 'application/json' } });
+        if (directScriptRes.ok) {
+          const sJson = await directScriptRes.json();
+          if (sJson && sJson.success && sJson.base64) {
+            base64 = sJson.base64;
+            mimeType = sJson.mimeType || 'application/pdf';
+            cacheFileBase64(fileUrl, base64, mimeType, fileName);
+          }
+        }
+      } catch (scriptClientErr) {
+        console.warn('Client direct Apps Script fetch failed:', scriptClientErr);
+      }
     }
   }
 
   if (!base64) {
-    throw new Error('No se pudo obtener el archivo del comprobante desde Google Drive para el análisis.');
+    throw new Error(`No se pudo descargar el archivo desde Google Drive (${fileUrl || 'comprobante'}). Verifica que el archivo en Drive tenga permiso "Cualquiera con el enlace" o adjunta la foto/PDF directamente para extraer sus datos.`);
+  }
+
+  if (fileUrl && base64) {
+    cacheFileBase64(fileUrl, base64, mimeType, fileName);
   }
 
   // 2. Fallback to client-side GoogleGenAI with multi-key rotation and multi-model resilience

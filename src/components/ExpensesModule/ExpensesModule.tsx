@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { ExpenseItem, ExpenseCategory } from '../../types';
-import { analyzeVoucherWithAI, compressFileToBase64, fileToBase64, VoucherAnalysisResult } from '../../utils/aiService';
+import { analyzeVoucherWithAI, compressFileToBase64, fileToBase64, VoucherAnalysisResult, cacheFileBase64 } from '../../utils/aiService';
 import { uploadVoucherToGoogleDrive, getGoogleDriveFolderUrl, getGoogleDriveFolderId, getExpensesDriveFolderConfig, getCompanyShortName, getAppsScriptUrl, cleanDriveFileUrl, DriveUploadResponse, syncToGoogleSheets } from '../../utils/googleSheetsSync';
 import { saveExpenses, loadSales, unmarkDeletedItem } from '../../utils/storage';
 import { ConfirmModal } from '../ConfirmModal';
@@ -498,6 +498,10 @@ export const ExpensesModule: React.FC<ExpensesModuleProps> = ({
       const fileUrl = (driveRes && driveRes.success && driveRes.fileUrl) ? driveRes.fileUrl : '';
       const fileName = (driveRes && driveRes.fileName) || file.name;
       const folderPath = (driveRes && driveRes.folderPath) || `Gastos / ${monthYearToUse}`;
+
+      if (fileUrl && compressed.base64) {
+        cacheFileBase64(fileUrl, compressed.base64, compressed.mimeType || file.type || 'image/jpeg', fileName);
+      }
 
       setUploadedVoucherState({
         fileBase64: compressed.base64,

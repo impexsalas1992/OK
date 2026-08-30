@@ -159,10 +159,16 @@ async function startServer() {
       trimmed = hyperlinkMatch[1].trim();
     }
 
-    // 2. Remove surrounding quotes and clean
+    // 2. HTML anchor tag like <a href="https://drive.google.com/file/d/...">
+    const htmlAnchorMatch = trimmed.match(/href\s*=\s*["']([^"']+)["']/i);
+    if (htmlAnchorMatch && htmlAnchorMatch[1]) {
+      trimmed = htmlAnchorMatch[1].trim();
+    }
+
+    // 3. Remove surrounding quotes and clean
     trimmed = trimmed.replace(/^["']|["']$/g, '').trim();
 
-    // 3. Various Google Drive URL formats
+    // 4. Various Google Drive URL formats
     const m1 = trimmed.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
     if (m1 && m1[1]) return m1[1];
     const m2 = trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
@@ -173,11 +179,15 @@ async function startServer() {
     if (m4 && m4[1]) return m4[1];
     const m5 = trimmed.match(/id=([a-zA-Z0-9_-]{20,})/);
     if (m5 && m5[1]) return m5[1];
+    const m6 = trimmed.match(/googleusercontent\.com\/d\/([a-zA-Z0-9_-]+)/);
+    if (m6 && m6[1]) return m6[1];
+    const m7 = trimmed.match(/\/open\?id=([a-zA-Z0-9_-]+)/);
+    if (m7 && m7[1]) return m7[1];
     if (/^[a-zA-Z0-9_-]{20,}$/.test(trimmed)) return trimmed;
     return null;
   }
 
-  // In-memory cache for fast repeat reads (5-minute TTL)
+  // In-memory cache for fast repeat reads (10-minute TTL)
   const serverDriveCache = new Map<string, { base64: string; mimeType: string; fileName?: string; expiry: number }>();
 
   // Helper: Fetch file from Google Drive ultra-fast (races direct Drive streams and Apps Script proxy)
@@ -194,7 +204,14 @@ async function startServer() {
       serverDriveCache.delete(cacheKey);
     }
 
-    const scriptUrl = (targetAppsScriptUrl || '').trim() || 'https://script.google.com/macros/s/AKfycbxMC-UAUbUrEn6WZthpgJN_RRLSqoJVza64fMY5DvzoahtrlaV0SE1RSI1-6FX-7aIb/exec';
+    const scriptUrls: string[] = [];
+    if (targetAppsScriptUrl && targetAppsScriptUrl.trim().startsWith('https://script.google.com/')) {
+      scriptUrls.push(targetAppsScriptUrl.trim());
+    }
+    const defaultScript = 'https://script.google.com/macros/s/AKfycbxMC-UAUbUrEn6WZthpgJN_RRLSqoJVza64fMY5DvzoahtrlaV0SE1RSI1-6FX-7aIb/exec';
+    if (!scriptUrls.includes(defaultScript)) {
+      scriptUrls.push(defaultScript);
+    }
 
     // Direct download helper
     async function fetchFromUrl(url: string): Promise<{ base64: string; mimeType: string }> {
@@ -211,8 +228,8 @@ async function startServer() {
       if (!buffer || buffer.byteLength < 80) throw new Error('Empty response');
 
       // Check if response is HTML error / login page
-      const headStr = Buffer.from(buffer.slice(0, 100)).toString('utf-8').toLowerCase();
-      if (headStr.includes('<!doctype') || headStr.includes('<html') || headStr.includes('<script')) {
+      const headStr = Buffer.from(buffer.slice(0, 150)).toString('utf-8').toLowerCase();
+      if (headStr.includes('<!doctype') || headStr.includes('<html') || headStr.includes('<script') || headStr.includes('accounts.google.com')) {
         throw new Error('Google Drive returned HTML preview/login page instead of binary content');
       }
 
@@ -238,10 +255,36 @@ async function startServer() {
       return { base64: base64Str, mimeType: detectedMime };
     }
 
-    // Apps Script proxy helper
-    async function fetchFromAppsScript(): Promise<{ base64: string; mimeType: string; fileName?: string }> {
+    // Apps Script proxy helper (supports GET and POST for resilience against redirects)
+    async function fetchFromAppsScript(scriptUrl: string): Promise<{ base64: string; mimeType: string; fileName?: string }> {
       if (!fileId || !scriptUrl) throw new Error('No fileId or scriptUrl');
-      const scriptRes = await fetch(scriptUrl, {
+
+      // Attempt 1: GET with query parameters (GET is preserved 100% reliably across Google 302 redirects)
+      try {
+        const getUrl = `${scriptUrl}${scriptUrl.includes('?') ? '&' : '?'}action=get_file_base64&fileId=${encodeURIComponent(fileId)}`;
+        const getRes = await fetch(getUrl, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          redirect: 'follow'
+        });
+
+        if (getRes.ok) {
+          const json = await getRes.json();
+          if (json && json.success && json.base64) {
+            return {
+              base64: json.base64,
+              mimeType: json.mimeType || 'application/pdf',
+              fileName: json.fileName
+            };
+          }
+        }
+      } catch (getErr) {
+        // Fallback to POST
+      }
+
+      // Attempt 2: POST with query string AND payload
+      const postUrl = `${scriptUrl}${scriptUrl.includes('?') ? '&' : '?'}action=get_file_base64&fileId=${encodeURIComponent(fileId)}`;
+      const scriptRes = await fetch(postUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({
@@ -269,11 +312,15 @@ async function startServer() {
     if (fileId) {
       candidateDirectUrls.push(
         `https://drive.google.com/thumbnail?id=${fileId}&sz=w2500`,
+        `https://drive.google.com/thumbnail?id=${fileId}&sz=w2000`,
+        `https://drive.google.com/thumbnail?id=${fileId}&sz=w1200`,
+        `https://lh3.googleusercontent.com/d/${fileId}=w2500`,
         `https://lh3.googleusercontent.com/d/${fileId}`,
-        `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`,
-        `https://docs.google.com/uc?export=download&id=${fileId}&confirm=t`,
         `https://drive.google.com/uc?export=download&id=${fileId}&confirm=t`,
-        `https://drive.google.com/uc?id=${fileId}&export=download`
+        `https://drive.google.com/uc?export=view&id=${fileId}`,
+        `https://drive.google.com/uc?id=${fileId}`,
+        `https://docs.google.com/uc?export=download&id=${fileId}&confirm=t`,
+        `https://drive.usercontent.google.com/download?id=${fileId}&export=download&authuser=0&confirm=t`
       );
     }
     if (fileUrl && (fileUrl.startsWith('http://') || fileUrl.startsWith('https://'))) {
@@ -282,8 +329,10 @@ async function startServer() {
 
     const downloadPromises: Promise<{ base64: string; mimeType: string; fileName?: string }>[] = candidateDirectUrls.map(url => fetchFromUrl(url));
 
-    if (fileId && scriptUrl) {
-      downloadPromises.push(fetchFromAppsScript());
+    for (const sUrl of scriptUrls) {
+      if (fileId && sUrl) {
+        downloadPromises.push(fetchFromAppsScript(sUrl));
+      }
     }
 
     try {
@@ -291,24 +340,28 @@ async function startServer() {
       const result = await Promise.any(downloadPromises);
       if (result && result.base64) {
         if (cacheKey) {
-          serverDriveCache.set(cacheKey, { ...result, expiry: Date.now() + 5 * 60 * 1000 });
+          serverDriveCache.set(cacheKey, { ...result, expiry: Date.now() + 10 * 60 * 1000 });
         }
         return result;
       }
     } catch (raceErr) {
       console.warn('Fast race failed, trying sequential Apps Script fallback:', raceErr);
-      try {
-        const fallback = await fetchFromAppsScript();
-        if (cacheKey) {
-          serverDriveCache.set(cacheKey, { ...fallback, expiry: Date.now() + 5 * 60 * 1000 });
+      for (const sUrl of scriptUrls) {
+        try {
+          const fallback = await fetchFromAppsScript(sUrl);
+          if (fallback && fallback.base64) {
+            if (cacheKey) {
+              serverDriveCache.set(cacheKey, { ...fallback, expiry: Date.now() + 10 * 60 * 1000 });
+            }
+            return fallback;
+          }
+        } catch (fbErr) {
+          console.warn(`Apps Script fallback failed for ${sUrl}:`, fbErr);
         }
-        return fallback;
-      } catch (fbErr) {
-        console.error('All Drive download methods failed:', fbErr);
       }
     }
 
-    throw new Error(`No se pudo obtener el archivo desde el enlace de Google Drive: ${fileUrl || fileId}`);
+    throw new Error(`No se pudo obtener el archivo desde el enlace de Google Drive (${fileUrl || fileId}). Verifica que el archivo en Drive tenga permiso de lectura.`);
   }
 
   // API Route: Download file from Google Drive as base64

@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { SaleItem } from '../../types';
-import { analyzeVoucherWithAI, compressFileToBase64, fileToBase64, VoucherAnalysisResult } from '../../utils/aiService';
+import { analyzeVoucherWithAI, compressFileToBase64, fileToBase64, VoucherAnalysisResult, cacheFileBase64 } from '../../utils/aiService';
 import { uploadVoucherToGoogleDrive, getGoogleDriveFolderUrl, getGoogleDriveFolderId, getSalesDriveFolderConfig, getCompanyShortName, getAppsScriptUrl, cleanDriveFileUrl, DriveUploadResponse, syncToGoogleSheets } from '../../utils/googleSheetsSync';
 import { saveSales, loadExpenses, unmarkDeletedItem } from '../../utils/storage';
 import { ConfirmModal } from '../ConfirmModal';
@@ -460,6 +460,10 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
       const fileUrl = (driveRes && driveRes.success && driveRes.fileUrl) ? driveRes.fileUrl : '';
       const fileName = (driveRes && driveRes.fileName) || file.name;
       const folderPath = (driveRes && driveRes.folderPath) || `Ventas / ${monthYearToUse}`;
+
+      if (fileUrl && compressed.base64) {
+        cacheFileBase64(fileUrl, compressed.base64, compressed.mimeType || file.type || 'image/jpeg', fileName);
+      }
 
       setUploadedVoucherState({
         fileBase64: compressed.base64,
