@@ -36,7 +36,8 @@ import {
   RotateCcw,
   Building2,
   Tag,
-  Camera
+  Camera,
+  Upload
 } from 'lucide-react';
 
 interface ExpensesModuleProps {
@@ -826,7 +827,115 @@ export const ExpensesModule: React.FC<ExpensesModuleProps> = ({
       setUiSuccess(`✨ ¡Comprobante de gasto leído con éxito desde el enlace de Drive! Se actualizaron todas las columnas: RUC ${updatedExpense.supplierDocNumber}, Proveedor "${updatedExpense.supplierName}", ${updatedExpense.type} ${updatedExpense.series}-${updatedExpense.number}, Categoría "${updatedExpense.expenseCategory}", Fecha ${updatedExpense.date}, Total S/ ${totalCalculated.toFixed(2)}${detractionAmt > 0 ? `, Detracción S/ ${detractionAmt.toFixed(2)}` : ''}${retentionAmt > 0 ? `, Retención 4ta S/ ${retentionAmt.toFixed(2)}` : ''}.`);
     } catch (err: any) {
       console.error('Error al leer comprobante de gasto con IA:', err);
-      setUiError(`Error al leer comprobante desde Google Drive: ${err.message || err}`);
+      setUiError(`Error al leer comprobante desde Google Drive: ${err.message || err}. Puedes usar el botón "📁 Subir archivo" para seleccionarlo directamente desde este dispositivo.`);
+    } finally {
+      setScanningRowId(null);
+    }
+  };
+
+  // Subir archivo directamente y escanear fila de gasto pendiente desde el dispositivo actual
+  const handleUploadAndScanPendingExpense = async (item: ExpenseItem, file: File) => {
+    if (!file) return;
+    setScanningRowId(item.id);
+    setUiError(null);
+    setUiSuccess(null);
+
+    try {
+      const { base64, mimeType } = await compressFileToBase64(file, 900, 0.65);
+      cacheFileBase64(item.fileUrl || file.name, base64, mimeType || file.type, file.name);
+
+      // 1. Extraer datos con IA desde el archivo cargado directamente
+      const aiRes = await analyzeVoucherWithAI(
+        {
+          base64,
+          mimeType: mimeType || file.type,
+          fileName: file.name
+        },
+        'expense',
+        apiKey,
+        selectedModel,
+        getAppsScriptUrl()
+      );
+
+      if (!aiRes) {
+        throw new Error('No se pudieron extraer datos del comprobante.');
+      }
+
+      // 2. Subir a Google Drive
+      const dateObj = aiRes.date ? new Date(aiRes.date) : (item.date ? new Date(item.date) : new Date());
+      const monthYear = `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
+      const expensesDriveConfig = getExpensesDriveFolderConfig();
+      
+      let driveUrl = item.fileUrl;
+      let driveFileName = item.fileName || file.name;
+      let drivePath = item.fileDrivePath;
+
+      try {
+        const driveRes = await uploadVoucherToGoogleDrive({
+          fileBase64: base64,
+          fileName: file.name,
+          mimeType: mimeType || file.type,
+          folderType: 'Gastos',
+          monthYear,
+          parentFolderId: expensesDriveConfig.effectiveId
+        });
+
+        if (driveRes.success && driveRes.fileUrl) {
+          driveUrl = driveRes.fileUrl;
+          driveFileName = driveRes.fileName || file.name;
+          drivePath = driveRes.folderPath || `Gastos / ${monthYear}`;
+        }
+      } catch (uploadErr) {
+        console.warn('Error uploading expense to Drive during row scan:', uploadErr);
+      }
+
+      const isRxH = aiRes.type === 'Recibo por Honorarios' || aiRes.type === 'RxH' || item.type === 'RxH';
+      const totalCalculated = aiRes.totalAmount !== undefined ? aiRes.totalAmount : (item.total || 0);
+      const baseCalculated = aiRes.baseAmount !== undefined ? aiRes.baseAmount : (isRxH ? totalCalculated : (totalCalculated > 0 ? parseFloat((totalCalculated / 1.18).toFixed(2)) : 0));
+      const igvCalculated = aiRes.igvAmount !== undefined ? aiRes.igvAmount : (isRxH ? 0 : (totalCalculated > 0 ? parseFloat((totalCalculated - baseCalculated).toFixed(2)) : 0));
+
+      const detractionAmt = aiRes.detractionAmount !== undefined ? aiRes.detractionAmount : (aiRes.detractionRate ? parseFloat(((totalCalculated * aiRes.detractionRate) / 100).toFixed(2)) : 0);
+      const retentionAmt = aiRes.retention4th !== undefined ? aiRes.retention4th : (isRxH && totalCalculated > 1500 ? parseFloat((totalCalculated * 0.08).toFixed(2)) : 0);
+      const netPayCalculated = aiRes.netPay !== undefined ? aiRes.netPay : (totalCalculated - detractionAmt - retentionAmt);
+
+      const updatedExpense: ExpenseItem = {
+        ...item,
+        expenseCategory: (aiRes.expenseCategory as ExpenseCategory) || item.expenseCategory || 'Otros Gastos',
+        date: aiRes.date || item.date || new Date().toISOString().split('T')[0],
+        dueDate: aiRes.dueDate || item.dueDate || '',
+        supplierName: aiRes.supplierName || item.supplierName || 'Proveedor No Identificado',
+        supplierDocNumber: aiRes.supplierDocNumber || item.supplierDocNumber || '-',
+        type: (aiRes.type as any) || item.type || 'Factura',
+        series: (aiRes.series || item.series || '-').toUpperCase().trim(),
+        number: aiRes.number || item.number || '-',
+        concept: aiRes.concept || item.concept || file.name || 'Gasto operativo',
+        base: baseCalculated,
+        igv: igvCalculated,
+        total: totalCalculated,
+        detractionRate: aiRes.detractionRate || 0,
+        detractionAmount: detractionAmt,
+        retention4th: retentionAmt,
+        netPay: netPayCalculated,
+        paymentMethod: aiRes.paymentMethod || item.paymentMethod || 'Contado',
+        fileUrl: driveUrl,
+        fileName: driveFileName,
+        fileDrivePath: drivePath,
+        isPendingScan: false,
+        storedBase64: undefined,
+        storedMimeType: undefined
+      };
+
+      const updatedList = expensesData.map(e => e.id === item.id ? updatedExpense : e);
+      unmarkDeletedItem(updatedExpense);
+      saveExpenses(updatedList);
+      setExpensesData(updatedList);
+      try {
+        window.dispatchEvent(new CustomEvent('app-item-added', { detail: { item: updatedExpense, allSales: loadSales(), allExpenses: updatedList } }));
+      } catch (e) {}
+      setUiSuccess(`✨ ¡Comprobante de gasto escaneado y actualizado con éxito! Se actualizaron todas las columnas: RUC ${updatedExpense.supplierDocNumber}, Proveedor "${updatedExpense.supplierName}", ${updatedExpense.type} ${updatedExpense.series}-${updatedExpense.number}, Categoría "${updatedExpense.expenseCategory}", Total S/ ${totalCalculated.toFixed(2)}.`);
+    } catch (err: any) {
+      console.error('Error al procesar archivo para gasto:', err);
+      setUiError(`Error al procesar comprobante de gasto: ${err.message || err}`);
     } finally {
       setScanningRowId(null);
     }
@@ -1588,39 +1697,79 @@ export const ExpensesModule: React.FC<ExpensesModuleProps> = ({
                             <div className="flex items-center justify-center gap-1.5">
                               {/* Botón Extraer Datos con IA para filas pendientes */}
                               {isPending ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleScanPendingExpense(item)}
-                                  disabled={isRowScanning}
-                                  className="inline-flex items-center gap-1.5 bg-gradient-to-r from-amber-500 via-emerald-600 to-teal-600 hover:from-amber-400 hover:to-emerald-500 text-white font-extrabold text-[11px] px-3 py-1 rounded-lg shadow-md hover:shadow-emerald-500/25 transition border border-amber-400/40 cursor-pointer animate-pulse hover:animate-none whitespace-nowrap"
-                                  title="Escanear ahora con IA para clasificar y llenar todas las columnas del reporte"
-                                >
-                                  {isRowScanning ? (
-                                    <>
-                                      <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                                      <span>Extrayendo...</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Zap className="w-3.5 h-3.5 text-amber-200 fill-amber-200" />
-                                      <span>⚡ Extraer datos con IA</span>
-                                    </>
-                                  )}
-                                </button>
+                                <div className="inline-flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleScanPendingExpense(item)}
+                                    disabled={isRowScanning}
+                                    className="inline-flex items-center gap-1.5 bg-gradient-to-r from-amber-500 via-emerald-600 to-teal-600 hover:from-amber-400 hover:to-emerald-500 text-white font-extrabold text-[11px] px-3 py-1 rounded-lg shadow-md hover:shadow-emerald-500/25 transition border border-amber-400/40 cursor-pointer animate-pulse hover:animate-none whitespace-nowrap"
+                                    title="Escanear ahora con IA desde Drive para clasificar y llenar todas las columnas del reporte"
+                                  >
+                                    {isRowScanning ? (
+                                      <>
+                                        <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                        <span>Extrayendo...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Zap className="w-3.5 h-3.5 text-amber-200 fill-amber-200" />
+                                        <span>⚡ Extraer datos con IA</span>
+                                      </>
+                                    )}
+                                  </button>
+
+                                  <label
+                                    title="Subir comprobante desde este dispositivo y extraer datos con IA"
+                                    className="inline-flex items-center justify-center p-1 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 hover:text-white rounded-lg cursor-pointer transition text-xs shadow-sm"
+                                  >
+                                    <Upload className="w-3.5 h-3.5 text-blue-400" />
+                                    <input
+                                      type="file"
+                                      accept="image/*,application/pdf"
+                                      className="hidden"
+                                      disabled={isRowScanning}
+                                      onChange={(e) => {
+                                        const file = e.target.files?.[0];
+                                        if (file) handleUploadAndScanPendingExpense(item, file);
+                                        e.target.value = '';
+                                      }}
+                                    />
+                                  </label>
+                                </div>
                               ) : (item.fileUrl || item.storedBase64) ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleScanPendingExpense(item)}
-                                  disabled={isRowScanning}
-                                  title="Re-escanear comprobante de gasto con IA desde Google Drive para actualizar todas las columnas"
-                                  className="p-1 text-slate-400 hover:text-amber-400 transition"
-                                >
-                                  {isRowScanning ? (
-                                    <div className="w-3.5 h-3.5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
-                                  ) : (
-                                    <Zap className="w-3.5 h-3.5" />
-                                  )}
-                                </button>
+                                <div className="inline-flex items-center gap-0.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleScanPendingExpense(item)}
+                                    disabled={isRowScanning}
+                                    title="Re-escanear comprobante de gasto con IA desde Google Drive para actualizar todas las columnas"
+                                    className="p-1 text-slate-400 hover:text-amber-400 transition"
+                                  >
+                                    {isRowScanning ? (
+                                      <div className="w-3.5 h-3.5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
+                                    ) : (
+                                      <Zap className="w-3.5 h-3.5" />
+                                    )}
+                                  </button>
+
+                                  <label
+                                    title="Subir archivo desde este dispositivo y re-escanear"
+                                    className="p-1 text-slate-400 hover:text-blue-400 cursor-pointer transition"
+                                  >
+                                    <Upload className="w-3.5 h-3.5" />
+                                    <input
+                                      type="file"
+                                      accept="image/*,application/pdf"
+                                      className="hidden"
+                                      disabled={isRowScanning}
+                                      onChange={(e) => {
+                                        const file = e.target.files?.[0];
+                                        if (file) handleUploadAndScanPendingExpense(item, file);
+                                        e.target.value = '';
+                                      }}
+                                    />
+                                  </label>
+                                </div>
                               ) : null}
 
                               <button

@@ -35,7 +35,8 @@ import {
   Filter,
   RotateCcw,
   Building2,
-  Camera
+  Camera,
+  Upload
 } from 'lucide-react';
 
 interface SalesModuleProps {
@@ -769,7 +770,111 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
       setUiSuccess(`✨ ¡Comprobante leído con éxito desde el enlace de Drive! Se actualizaron todas las columnas: RUC ${updatedSale.clientDocNumber}, Cliente "${updatedSale.clientName}", ${updatedSale.type} ${updatedSale.series}-${updatedSale.number}, Fecha ${updatedSale.date}, Base S/ ${baseCalculated.toFixed(2)}, IGV S/ ${igvCalculated.toFixed(2)}, Total S/ ${totalCalculated.toFixed(2)}${detractionAmt > 0 ? `, Detracción S/ ${detractionAmt.toFixed(2)}` : ''}.`);
     } catch (err: any) {
       console.error('Error al leer comprobante con IA:', err);
-      setUiError(`Error al leer comprobante desde Google Drive: ${err.message || err}`);
+      setUiError(`Error al leer comprobante desde Google Drive: ${err.message || err}. Puedes usar el botón "📁 Subir archivo" para seleccionarlo desde este dispositivo.`);
+    } finally {
+      setScanningRowId(null);
+    }
+  };
+
+  // Subir archivo directamente y escanear fila pendiente desde el dispositivo actual
+  const handleUploadAndScanPendingSale = async (item: SaleItem, file: File) => {
+    if (!file) return;
+    setScanningRowId(item.id);
+    setUiError(null);
+    setUiSuccess(null);
+
+    try {
+      const { base64, mimeType } = await compressFileToBase64(file, 900, 0.65);
+      cacheFileBase64(item.fileUrl || file.name, base64, mimeType || file.type, file.name);
+
+      // 1. Extraer datos con IA desde el archivo cargado directamente
+      const aiRes = await analyzeVoucherWithAI(
+        {
+          base64,
+          mimeType: mimeType || file.type,
+          fileName: file.name
+        },
+        'sale',
+        apiKey,
+        selectedModel,
+        getAppsScriptUrl()
+      );
+
+      if (!aiRes) {
+        throw new Error('No se pudieron extraer datos del comprobante.');
+      }
+
+      // 2. Subir a Google Drive
+      const dateObj = aiRes.date ? new Date(aiRes.date) : (item.date ? new Date(item.date) : new Date());
+      const monthYear = `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
+      const salesDriveConfig = getSalesDriveFolderConfig();
+      
+      let driveUrl = item.fileUrl;
+      let driveFileName = item.fileName || file.name;
+      let drivePath = item.fileDrivePath;
+
+      try {
+        const driveRes = await uploadVoucherToGoogleDrive({
+          fileBase64: base64,
+          fileName: file.name,
+          mimeType: mimeType || file.type,
+          folderType: 'Ventas',
+          monthYear,
+          parentFolderId: salesDriveConfig.effectiveId
+        });
+
+        if (driveRes.success && driveRes.fileUrl) {
+          driveUrl = driveRes.fileUrl;
+          driveFileName = driveRes.fileName || file.name;
+          drivePath = driveRes.folderPath || `Ventas / ${monthYear}`;
+        }
+      } catch (uploadErr) {
+        console.warn('Error uploading to Drive during row scan:', uploadErr);
+      }
+
+      const totalCalculated = aiRes.totalAmount !== undefined ? aiRes.totalAmount : (item.total || 0);
+      const baseCalculated = aiRes.baseAmount !== undefined ? aiRes.baseAmount : (totalCalculated > 0 ? parseFloat((totalCalculated / 1.18).toFixed(2)) : 0);
+      const igvCalculated = aiRes.igvAmount !== undefined ? aiRes.igvAmount : (totalCalculated > 0 ? parseFloat((totalCalculated - baseCalculated).toFixed(2)) : 0);
+      const detractionAmt = aiRes.detractionAmount !== undefined ? aiRes.detractionAmount : (aiRes.detractionRate ? parseFloat(((totalCalculated * aiRes.detractionRate) / 100).toFixed(2)) : 0);
+      const netPayCalculated = aiRes.netPay !== undefined ? aiRes.netPay : (totalCalculated - detractionAmt);
+
+      const updatedSale: SaleItem = {
+        ...item,
+        date: aiRes.date || item.date || new Date().toISOString().split('T')[0],
+        dueDate: aiRes.dueDate || item.dueDate || '',
+        clientName: aiRes.clientName || item.clientName || 'Cliente No Identificado',
+        clientDocNumber: aiRes.clientDocNumber || item.clientDocNumber || '-',
+        type: (aiRes.type as any) || item.type || 'Factura',
+        series: (aiRes.series || item.series || '-').toUpperCase().trim(),
+        number: aiRes.number || item.number || '-',
+        concept: aiRes.concept || item.concept || file.name || 'Venta de mercadería',
+        base: baseCalculated,
+        igv: igvCalculated,
+        total: totalCalculated,
+        detractionRate: aiRes.detractionRate || 0,
+        detractionAmount: detractionAmt,
+        netPay: netPayCalculated,
+        cost: item.cost || 0,
+        paymentMethod: aiRes.paymentMethod || item.paymentMethod || 'Contado',
+        fileUrl: driveUrl,
+        fileName: driveFileName,
+        fileDrivePath: drivePath,
+        isPendingScan: false,
+        storedBase64: undefined,
+        storedMimeType: undefined
+      };
+
+      const updatedList = salesData.map(s => s.id === item.id ? updatedSale : s);
+      unmarkDeletedItem(updatedSale);
+      saveSales(updatedList);
+      setSalesData(updatedList);
+      try {
+        window.dispatchEvent(new CustomEvent('app-item-added', { detail: { item: updatedSale, allSales: updatedList, allExpenses: loadExpenses() } }));
+      } catch (e) {}
+      setUiSuccess(`✨ ¡Comprobante escaneado y actualizado con éxito! Se actualizaron todas las columnas: RUC ${updatedSale.clientDocNumber}, Cliente "${updatedSale.clientName}", ${updatedSale.type} ${updatedSale.series}-${updatedSale.number}, Total S/ ${totalCalculated.toFixed(2)}.`);
+    } catch (err: any) {
+      console.error('Error al procesar archivo para venta:', err);
+      setUiError(`Error al procesar comprobante: ${err.message || err}`);
     } finally {
       setScanningRowId(null);
     }
@@ -1481,39 +1586,79 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
                             <div className="flex items-center justify-center gap-1.5">
                               {/* Botón Extraer Datos con IA para filas pendientes */}
                               {isPending ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleScanPendingSale(item)}
-                                  disabled={isRowScanning}
-                                  className="inline-flex items-center gap-1.5 bg-gradient-to-r from-amber-500 via-emerald-600 to-teal-600 hover:from-amber-400 hover:to-emerald-500 text-white font-extrabold text-[11px] px-3 py-1 rounded-lg shadow-md hover:shadow-emerald-500/25 transition border border-amber-400/40 cursor-pointer animate-pulse hover:animate-none whitespace-nowrap"
-                                  title="Escanear ahora con IA para autocompletar todas las columnas del reporte"
-                                >
-                                  {isRowScanning ? (
-                                    <>
-                                      <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                                      <span>Extrayendo...</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Zap className="w-3.5 h-3.5 text-amber-200 fill-amber-200" />
-                                      <span>⚡ Extraer datos con IA</span>
-                                    </>
-                                  )}
-                                </button>
+                                <div className="inline-flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleScanPendingSale(item)}
+                                    disabled={isRowScanning}
+                                    className="inline-flex items-center gap-1.5 bg-gradient-to-r from-amber-500 via-emerald-600 to-teal-600 hover:from-amber-400 hover:to-emerald-500 text-white font-extrabold text-[11px] px-3 py-1 rounded-lg shadow-md hover:shadow-emerald-500/25 transition border border-amber-400/40 cursor-pointer animate-pulse hover:animate-none whitespace-nowrap"
+                                    title="Escanear ahora con IA desde Drive para autocompletar todas las columnas del reporte"
+                                  >
+                                    {isRowScanning ? (
+                                      <>
+                                        <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                        <span>Extrayendo...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Zap className="w-3.5 h-3.5 text-amber-200 fill-amber-200" />
+                                        <span>⚡ Extraer datos con IA</span>
+                                      </>
+                                    )}
+                                  </button>
+
+                                  <label
+                                    title="Subir comprobante desde este dispositivo y extraer datos con IA"
+                                    className="inline-flex items-center justify-center p-1 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-300 hover:text-white rounded-lg cursor-pointer transition text-xs shadow-sm"
+                                  >
+                                    <Upload className="w-3.5 h-3.5 text-blue-400" />
+                                    <input
+                                      type="file"
+                                      accept="image/*,application/pdf"
+                                      className="hidden"
+                                      disabled={isRowScanning}
+                                      onChange={(e) => {
+                                        const file = e.target.files?.[0];
+                                        if (file) handleUploadAndScanPendingSale(item, file);
+                                        e.target.value = '';
+                                      }}
+                                    />
+                                  </label>
+                                </div>
                               ) : (item.fileUrl || item.storedBase64) ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleScanPendingSale(item)}
-                                  disabled={isRowScanning}
-                                  title="Re-escanear comprobante con IA desde Google Drive para actualizar todas las columnas"
-                                  className="p-1 text-slate-400 hover:text-amber-400 transition"
-                                >
-                                  {isRowScanning ? (
-                                    <div className="w-3.5 h-3.5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
-                                  ) : (
-                                    <Zap className="w-3.5 h-3.5" />
-                                  )}
-                                </button>
+                                <div className="inline-flex items-center gap-0.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleScanPendingSale(item)}
+                                    disabled={isRowScanning}
+                                    title="Re-escanear comprobante con IA desde Google Drive para actualizar todas las columnas"
+                                    className="p-1 text-slate-400 hover:text-amber-400 transition"
+                                  >
+                                    {isRowScanning ? (
+                                      <div className="w-3.5 h-3.5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
+                                    ) : (
+                                      <Zap className="w-3.5 h-3.5" />
+                                    )}
+                                  </button>
+
+                                  <label
+                                    title="Subir archivo desde este dispositivo y re-escanear"
+                                    className="p-1 text-slate-400 hover:text-blue-400 cursor-pointer transition"
+                                  >
+                                    <Upload className="w-3.5 h-3.5" />
+                                    <input
+                                      type="file"
+                                      accept="image/*,application/pdf"
+                                      className="hidden"
+                                      disabled={isRowScanning}
+                                      onChange={(e) => {
+                                        const file = e.target.files?.[0];
+                                        if (file) handleUploadAndScanPendingSale(item, file);
+                                        e.target.value = '';
+                                      }}
+                                    />
+                                  </label>
+                                </div>
                               ) : null}
 
                               <button

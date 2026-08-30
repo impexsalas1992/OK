@@ -183,12 +183,34 @@ async function startServer() {
     if (m6 && m6[1]) return m6[1];
     const m7 = trimmed.match(/\/open\?id=([a-zA-Z0-9_-]+)/);
     if (m7 && m7[1]) return m7[1];
+    const m8 = trimmed.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+    if (m8 && m8[1]) return m8[1];
     if (/^[a-zA-Z0-9_-]{20,}$/.test(trimmed)) return trimmed;
     return null;
   }
 
   // In-memory cache for fast repeat reads (10-minute TTL)
   const serverDriveCache = new Map<string, { base64: string; mimeType: string; fileName?: string; expiry: number }>();
+
+  function detectMimeFromBuffer(buffer: ArrayBuffer, headerType?: string | null): string {
+    const rawType = headerType || '';
+    if (rawType.includes('image/png')) return 'image/png';
+    if (rawType.includes('image/jpeg') || rawType.includes('image/jpg')) return 'image/jpeg';
+    if (rawType.includes('image/webp')) return 'image/webp';
+    if (rawType.includes('application/pdf')) return 'application/pdf';
+
+    const bytes = new Uint8Array(buffer.slice(0, 8));
+    if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) {
+      return 'application/pdf';
+    }
+    if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) {
+      return 'image/jpeg';
+    }
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
+      return 'image/png';
+    }
+    return 'image/jpeg';
+  }
 
   // Helper: Fetch file from Google Drive ultra-fast (races direct Drive streams and Apps Script proxy)
   async function resolveFileBase64(fileUrl?: string, fileIdInput?: string, targetAppsScriptUrl?: string): Promise<{ base64: string; mimeType: string; fileName?: string }> {
@@ -213,44 +235,58 @@ async function startServer() {
       scriptUrls.push(defaultScript);
     }
 
-    // Direct download helper
+    // Direct download helper with cookie and confirmation token support
     async function fetchFromUrl(url: string): Promise<{ base64: string; mimeType: string }> {
       const resp = await fetch(url, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
           'Accept': 'image/jpeg,image/png,image/webp,application/pdf,*/*'
         },
         redirect: 'follow'
       });
 
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const cookies = resp.headers.get('set-cookie') || '';
       const buffer = await resp.arrayBuffer();
       if (!buffer || buffer.byteLength < 80) throw new Error('Empty response');
 
-      // Check if response is HTML error / login page
-      const headStr = Buffer.from(buffer.slice(0, 150)).toString('utf-8').toLowerCase();
+      // Check if response is HTML error / login page / confirmation page
+      const headStr = Buffer.from(buffer.slice(0, 300)).toString('utf-8').toLowerCase();
       if (headStr.includes('<!doctype') || headStr.includes('<html') || headStr.includes('<script') || headStr.includes('accounts.google.com')) {
+        // Try parsing confirmation token for large files / antivirus scan pages
+        const fullHtml = Buffer.from(buffer).toString('utf-8');
+        const tokenMatch = fullHtml.match(/confirm=([a-zA-Z0-9_-]+)/i) || 
+                           fullHtml.match(/name="confirm"\s+value="([^"]+)"/i) ||
+                           fullHtml.match(/href="(\/uc\?export=download[^"]+)"/i);
+
+        if (tokenMatch && fileId) {
+          const confirmToken = tokenMatch[1].startsWith('/uc') ? tokenMatch[1] : `/uc?export=download&confirm=${tokenMatch[1]}&id=${fileId}`;
+          const confirmUrl = `https://drive.google.com${confirmToken.startsWith('/') ? confirmToken : '/' + confirmToken}`;
+          
+          const confirmResp = await fetch(confirmUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+              'Cookie': cookies,
+              'Accept': 'image/jpeg,image/png,image/webp,application/pdf,*/*'
+            },
+            redirect: 'follow'
+          });
+
+          if (confirmResp.ok) {
+            const confirmBuffer = await confirmResp.arrayBuffer();
+            if (confirmBuffer && confirmBuffer.byteLength > 80) {
+              const checkHead = Buffer.from(confirmBuffer.slice(0, 150)).toString('utf-8').toLowerCase();
+              if (!checkHead.includes('<!doctype') && !checkHead.includes('<html')) {
+                const b64 = Buffer.from(confirmBuffer).toString('base64');
+                return { base64: b64, mimeType: detectMimeFromBuffer(confirmBuffer, confirmResp.headers.get('content-type')) };
+              }
+            }
+          }
+        }
         throw new Error('Google Drive returned HTML preview/login page instead of binary content');
       }
 
-      const rawType = resp.headers.get('content-type') || '';
-      let detectedMime = 'application/pdf';
-
-      if (rawType.includes('image/png')) detectedMime = 'image/png';
-      else if (rawType.includes('image/jpeg') || rawType.includes('image/jpg')) detectedMime = 'image/jpeg';
-      else if (rawType.includes('image/webp')) detectedMime = 'image/webp';
-      else if (rawType.includes('application/pdf')) detectedMime = 'application/pdf';
-      else {
-        const bytes = new Uint8Array(buffer.slice(0, 8));
-        if (bytes[0] === 0x25 && bytes[1] === 0x40 && bytes[2] === 0x44 && bytes[3] === 0x46) {
-          detectedMime = 'application/pdf';
-        } else if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) {
-          detectedMime = 'image/jpeg';
-        } else if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
-          detectedMime = 'image/png';
-        }
-      }
-
+      const detectedMime = detectMimeFromBuffer(buffer, resp.headers.get('content-type'));
       const base64Str = Buffer.from(buffer).toString('base64');
       return { base64: base64Str, mimeType: detectedMime };
     }
@@ -282,40 +318,75 @@ async function startServer() {
         // Fallback to POST
       }
 
-      // Attempt 2: POST with query string AND payload
-      const postUrl = `${scriptUrl}${scriptUrl.includes('?') ? '&' : '?'}action=get_file_base64&fileId=${encodeURIComponent(fileId)}`;
-      const scriptRes = await fetch(postUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({
-          action: 'get_file_base64',
-          fileId,
-          fileUrl
-        }),
-        redirect: 'follow'
-      });
+      // Attempt 2: POST with text/plain body (bypasses CORS & redirect body stripping)
+      try {
+        const postUrl = `${scriptUrl}${scriptUrl.includes('?') ? '&' : '?'}action=get_file_base64&fileId=${encodeURIComponent(fileId)}`;
+        const scriptRes = await fetch(postUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            action: 'get_file_base64',
+            fileId,
+            fileUrl
+          }),
+          redirect: 'follow'
+        });
 
-      if (!scriptRes.ok) throw new Error(`Apps Script HTTP ${scriptRes.status}`);
-      const json = await scriptRes.json();
-      if (json && json.success && json.base64) {
-        return {
-          base64: json.base64,
-          mimeType: json.mimeType || 'application/pdf',
-          fileName: json.fileName
-        };
+        if (scriptRes.ok) {
+          const json = await scriptRes.json();
+          if (json && json.success && json.base64) {
+            return {
+              base64: json.base64,
+              mimeType: json.mimeType || 'application/pdf',
+              fileName: json.fileName
+            };
+          }
+        }
+      } catch (postErr) {
+        // Fallback
       }
-      throw new Error(json?.error || 'Apps script returned unsuccessful');
+
+      // Attempt 3: POST with application/json
+      try {
+        const scriptRes2 = await fetch(scriptUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'get_file_base64',
+            fileId,
+            fileUrl
+          }),
+          redirect: 'follow'
+        });
+
+        if (scriptRes2.ok) {
+          const json2 = await scriptRes2.json();
+          if (json2 && json2.success && json2.base64) {
+            return {
+              base64: json2.base64,
+              mimeType: json2.mimeType || 'application/pdf',
+              fileName: json2.fileName
+            };
+          }
+        }
+      } catch (postErr2) {}
+
+      throw new Error(`No se pudo obtener el archivo a través del script de Apps Script`);
     }
 
     // Candidate direct streams
     const candidateDirectUrls: string[] = [];
     if (fileId) {
       candidateDirectUrls.push(
+        `https://drive.google.com/thumbnail?id=${fileId}&sz=w3000`,
         `https://drive.google.com/thumbnail?id=${fileId}&sz=w2500`,
         `https://drive.google.com/thumbnail?id=${fileId}&sz=w2000`,
         `https://drive.google.com/thumbnail?id=${fileId}&sz=w1200`,
+        `https://drive.google.com/thumbnail?id=${fileId}&sz=w800`,
         `https://lh3.googleusercontent.com/d/${fileId}=w2500`,
+        `https://lh3.googleusercontent.com/d/${fileId}=w1600`,
         `https://lh3.googleusercontent.com/d/${fileId}`,
+        `https://lh3.google.com/u/0/d/${fileId}`,
         `https://drive.google.com/uc?export=download&id=${fileId}&confirm=t`,
         `https://drive.google.com/uc?export=view&id=${fileId}`,
         `https://drive.google.com/uc?id=${fileId}`,
@@ -361,7 +432,7 @@ async function startServer() {
       }
     }
 
-    throw new Error(`No se pudo obtener el archivo desde el enlace de Google Drive (${fileUrl || fileId}). Verifica que el archivo en Drive tenga permiso de lectura.`);
+    throw new Error(`No se pudo obtener el archivo desde el enlace de Google Drive (${fileUrl || fileId}). Verifica los permisos de lectura del archivo en Google Drive o sube el comprobante directamente.`);
   }
 
   // API Route: Download file from Google Drive as base64
