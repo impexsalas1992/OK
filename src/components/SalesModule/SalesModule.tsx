@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { SaleItem } from '../../types';
 import { analyzeVoucherWithAI, compressFileToBase64, fileToBase64, VoucherAnalysisResult } from '../../utils/aiService';
-import { uploadVoucherToGoogleDrive, getGoogleDriveFolderUrl, getGoogleDriveFolderId, getSalesDriveFolderConfig, getCompanyShortName, getAppsScriptUrl, DriveUploadResponse, syncToGoogleSheets } from '../../utils/googleSheetsSync';
+import { uploadVoucherToGoogleDrive, getGoogleDriveFolderUrl, getGoogleDriveFolderId, getSalesDriveFolderConfig, getCompanyShortName, getAppsScriptUrl, cleanDriveFileUrl, DriveUploadResponse, syncToGoogleSheets } from '../../utils/googleSheetsSync';
 import { saveSales, loadExpenses, unmarkDeletedItem } from '../../utils/storage';
 import { ConfirmModal } from '../ConfirmModal';
 import {
@@ -34,7 +34,8 @@ import {
   Zap,
   Filter,
   RotateCcw,
-  Building2
+  Building2,
+  Camera
 } from 'lucide-react';
 
 interface SalesModuleProps {
@@ -143,6 +144,8 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
   const [formFileUrl, setFormFileUrl] = useState<string>('');
   const [formFileName, setFormFileName] = useState<string>('');
   const [formFileDrivePath, setFormFileDrivePath] = useState<string>('');
+  const [formFileBase64, setFormFileBase64] = useState<string>('');
+  const [formFileMimeType, setFormFileMimeType] = useState<string>('');
   const [isFormFileUploading, setIsFormFileUploading] = useState(false);
 
   // Selection & Deletion states
@@ -424,6 +427,8 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
     setFormFileUrl('');
     setFormFileName('');
     setFormFileDrivePath('');
+    setFormFileBase64('');
+    setFormFileMimeType('');
   };
 
   // 1. SUBIDA INICIAL DEL COMPROBANTE A GOOGLE DRIVE
@@ -538,10 +543,16 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
 
     try {
       const aiRes = await analyzeVoucherWithAI(
-        { base64: uploadedVoucherState.fileBase64, mimeType: uploadedVoucherState.mimeType },
+        {
+          base64: uploadedVoucherState.fileBase64,
+          mimeType: uploadedVoucherState.mimeType,
+          fileUrl: uploadedVoucherState.fileUrl,
+          fileName: uploadedVoucherState.fileName
+        },
         'sale',
         apiKey,
-        selectedModel
+        selectedModel,
+        getAppsScriptUrl()
       );
 
       resetForm();
@@ -550,6 +561,8 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
         setFormFileUrl(uploadedVoucherState.fileUrl);
         setFormFileName(uploadedVoucherState.fileName);
         setFormFileDrivePath(uploadedVoucherState.folderPath);
+        setFormFileBase64(uploadedVoucherState.fileBase64 || '');
+        setFormFileMimeType(uploadedVoucherState.mimeType || 'image/jpeg');
       }
 
       if (aiRes) {
@@ -594,6 +607,8 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
       setFormFileUrl(uploadedVoucherState.fileUrl);
       setFormFileName(uploadedVoucherState.fileName);
       setFormFileDrivePath(uploadedVoucherState.folderPath);
+      setFormFileBase64(uploadedVoucherState.fileBase64 || '');
+      setFormFileMimeType(uploadedVoucherState.mimeType || 'image/jpeg');
     }
 
     const aiRes = uploadedVoucherState.extractedData;
@@ -627,6 +642,8 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
       setFormFileUrl(uploadedVoucherState.fileUrl);
       setFormFileName(uploadedVoucherState.fileName);
       setFormFileDrivePath(uploadedVoucherState.folderPath);
+      setFormFileBase64(uploadedVoucherState.fileBase64 || '');
+      setFormFileMimeType(uploadedVoucherState.mimeType || 'image/jpeg');
     }
     setUploadedVoucherState(null);
     setActiveTab('new-sale');
@@ -765,6 +782,9 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
 
     try {
       const { base64, mimeType } = await compressFileToBase64(file, 900, 0.65);
+      setFormFileBase64(base64);
+      setFormFileMimeType(mimeType || file.type || 'image/jpeg');
+
       const salesDriveConfig = getSalesDriveFolderConfig();
       const driveRes = await uploadVoucherToGoogleDrive({
         fileBase64: base64,
@@ -779,15 +799,71 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
         setFormFileUrl(driveRes.fileUrl);
         setFormFileName(driveRes.fileName || file.name);
         setFormFileDrivePath(driveRes.folderPath || `Ventas / ${monthYear}`);
-        setUiSuccess(`✅ Archivo adjunto guardado en Google Drive (${driveRes.folderPath || `Ventas / ${monthYear}`})`);
+        setUiSuccess(`✅ Archivo adjunto guardado en Google Drive (${driveRes.folderPath || `Ventas / ${monthYear}`}). Puedes hacer clic en "⚡ Extraer con IA" para autocompletar el formulario.`);
       } else {
-        setUiError(driveRes.error || 'No se pudo guardar el archivo en Google Drive');
+        setFormFileName(file.name);
+        setUiError(driveRes.error || 'No se pudo guardar en Drive, pero puedes extraer datos con IA directamente.');
       }
     } catch (err: any) {
-      setUiError(`Error al subir archivo: ${err.message}`);
+      setUiError(`Error al procesar archivo: ${err.message}`);
     } finally {
       setIsFormFileUploading(false);
       e.target.value = '';
+    }
+  };
+
+  // Extraer datos con IA directamente desde el comprobante adjunto en el formulario
+  const handleExtractFromFormVoucher = async () => {
+    if (!formFileBase64 && !formFileUrl) {
+      setUiError('No hay archivo ni enlace de comprobante en el formulario para analizar.');
+      return;
+    }
+
+    setIsExtractingAI(true);
+    setUiError(null);
+    setUiSuccess(null);
+
+    try {
+      const aiRes = await analyzeVoucherWithAI(
+        {
+          base64: formFileBase64 || undefined,
+          mimeType: formFileMimeType || undefined,
+          fileUrl: formFileUrl || undefined,
+          fileName: formFileName || undefined
+        },
+        'sale',
+        apiKey,
+        selectedModel,
+        getAppsScriptUrl()
+      );
+
+      if (aiRes) {
+        if (aiRes.date) setFormDate(aiRes.date);
+        if (aiRes.dueDate) setFormDueDate(aiRes.dueDate);
+        if (aiRes.clientName) setFormClientName(aiRes.clientName);
+        if (aiRes.clientDocNumber) setFormDocNumber(aiRes.clientDocNumber);
+        if (aiRes.type) setFormVoucherType(aiRes.type as any || 'Factura');
+        if (aiRes.series) setFormSeries(aiRes.series);
+        if (aiRes.number) setFormNumber(aiRes.number);
+        if (aiRes.concept) setFormConcept(aiRes.concept);
+        if (aiRes.baseAmount) setFormBase(aiRes.baseAmount);
+        if (aiRes.igvAmount) setFormIgv(aiRes.igvAmount);
+        if (aiRes.totalAmount) setFormTotal(aiRes.totalAmount);
+        if (aiRes.detractionRate) setFormDetractionRate(aiRes.detractionRate);
+        if (aiRes.detractionAmount) setFormDetractionAmount(aiRes.detractionAmount);
+        if (aiRes.netPay) setFormNetPay(aiRes.netPay);
+        if (aiRes.paymentMethod) setFormPaymentMethod(aiRes.paymentMethod);
+
+        if (aiRes.totalAmount && !aiRes.baseAmount) {
+          handleTotalChange(aiRes.totalAmount);
+        }
+
+        setUiSuccess(`✨ ¡Campos autocompletados con IA a partir del comprobante de venta!`);
+      }
+    } catch (err: any) {
+      setUiError(`Error al extraer datos con IA: ${err.message || err}`);
+    } finally {
+      setIsExtractingAI(false);
     }
   };
 
@@ -1742,46 +1818,67 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
               </div>
             )}
 
-            {/* Drag & Drop Upload Zone (Shown when no file uploaded yet) */}
+            {/* Drag & Drop Upload Zone & Camera Option */}
             {!uploadedVoucherState && (
-              <div
-                onDragEnter={handleDrag}
-                onDragLeave={handleDrag}
-                onDragOver={handleDrag}
-                onDrop={handleDrop}
-                className={`relative border-2 border-dashed rounded-2xl p-8 text-center transition cursor-pointer ${
-                  dragActive
-                    ? 'border-emerald-400 bg-emerald-950/30'
-                    : 'border-slate-600 bg-slate-900/40 hover:border-emerald-500 hover:bg-slate-900/60'
-                }`}
-              >
-                <input
-                  type="file"
-                  accept="image/*,application/pdf"
-                  id="sales-file-upload-input"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) processFileUpload(f);
-                  }}
-                  disabled={isScanning}
-                />
-                <label htmlFor="sales-file-upload-input" className="cursor-pointer block space-y-3">
-                  <UploadCloud className={`w-12 h-12 mx-auto transition ${dragActive ? 'text-emerald-400 scale-110' : 'text-slate-400'}`} />
-                  <div>
-                    <p className="text-base font-semibold text-slate-200">
-                      Haz clic para seleccionar o arrastra el comprobante aquí
-                    </p>
-                    <p className="text-xs text-slate-400 mt-1">
-                      Formatos soportados: PDF, JPG, PNG, WEBP (Facturas y Boletas)
-                    </p>
-                  </div>
-                  <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-300 text-xs font-medium mt-2">
-                    <span>1° Se sube a Drive ({targetMonthYear})</span>
-                    <span>➔</span>
-                    <span>2° Botón para registrar datos con IA</span>
-                  </div>
-                </label>
+              <div className="space-y-3">
+                <div
+                  onDragEnter={handleDrag}
+                  onDragLeave={handleDrag}
+                  onDragOver={handleDrag}
+                  onDrop={handleDrop}
+                  className={`relative border-2 border-dashed rounded-2xl p-8 text-center transition cursor-pointer ${
+                    dragActive
+                      ? 'border-emerald-400 bg-emerald-950/30'
+                      : 'border-slate-600 bg-slate-900/40 hover:border-emerald-500 hover:bg-slate-900/60'
+                  }`}
+                >
+                  <input
+                    type="file"
+                    accept="image/*,application/pdf"
+                    id="sales-file-upload-input"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) processFileUpload(f);
+                    }}
+                    disabled={isScanning}
+                  />
+                  <label htmlFor="sales-file-upload-input" className="cursor-pointer block space-y-3">
+                    <UploadCloud className={`w-12 h-12 mx-auto transition ${dragActive ? 'text-emerald-400 scale-110' : 'text-slate-400'}`} />
+                    <div>
+                      <p className="text-base font-semibold text-slate-200">
+                        Haz clic para seleccionar o arrastra el comprobante aquí
+                      </p>
+                      <p className="text-xs text-slate-400 mt-1">
+                        Formatos soportados: PDF, JPG, PNG, WEBP (Facturas y Boletas)
+                      </p>
+                    </div>
+                    <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-300 text-xs font-medium mt-2">
+                      <span>1° Se sube a Drive ({targetMonthYear})</span>
+                      <span>➔</span>
+                      <span>2° Botón para registrar datos con IA</span>
+                    </div>
+                  </label>
+                </div>
+
+                {/* Mobile Camera Direct Button */}
+                <div className="flex justify-center">
+                  <label className="inline-flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-600 hover:border-emerald-500 text-slate-200 hover:text-white rounded-xl text-xs font-semibold cursor-pointer shadow transition">
+                    <Camera className="w-4 h-4 text-emerald-400" />
+                    <span>Tomar Foto con la Cámara (Móvil / Tablet)</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) processFileUpload(f);
+                      }}
+                      disabled={isScanning}
+                    />
+                  </label>
+                </div>
               </div>
             )}
 
@@ -1851,7 +1948,29 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 w-full sm:w-auto">
+              <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
+                {(formFileUrl || formFileBase64) && (
+                  <button
+                    type="button"
+                    onClick={handleExtractFromFormVoucher}
+                    disabled={isExtractingAI || isFormFileUploading}
+                    className="bg-gradient-to-r from-amber-500 via-emerald-600 to-teal-600 hover:from-amber-400 hover:to-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition shadow-sm border border-amber-400/40"
+                    title="Extraer RUC, Cliente, Serie, Número, Fechas y Montos con Inteligencia Artificial"
+                  >
+                    {isExtractingAI ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                        <span>Extrayendo con IA...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Zap className="w-3.5 h-3.5 text-amber-200 fill-amber-200" />
+                        <span>⚡ Extraer con IA</span>
+                      </>
+                    )}
+                  </button>
+                )}
+
                 {formFileUrl && (
                   <a
                     href={formFileUrl}
@@ -1870,6 +1989,19 @@ export const SalesModule: React.FC<SalesModuleProps> = ({
                   <input
                     type="file"
                     accept="image/*,application/pdf"
+                    onChange={handleFormFileUpload}
+                    disabled={isFormFileUploading}
+                    className="hidden"
+                  />
+                </label>
+
+                {/* Mobile Camera upload button */}
+                <label className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 text-xs font-medium p-1.5 rounded-lg flex items-center gap-1 cursor-pointer transition" title="Tomar foto con la cámara del dispositivo">
+                  <Camera className="w-4 h-4 text-emerald-400" />
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
                     onChange={handleFormFileUpload}
                     disabled={isFormFileUploading}
                     className="hidden"
