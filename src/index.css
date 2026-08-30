@@ -1,0 +1,174 @@
+@import "tailwindcss";
+
+@layer base {
+  html, body {
+    touch-action: manipulation;
+    -webkit-text-size-adjust: 100%;
+    -moz-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    overscroll-behavior-y: contain;
+    overscroll-behavior-x: none;
+    -webkit-tap-highlight-color: transparent;
+    user-select: text;
+  }
+
+  * {
+    touch-action: manipulation;
+  }
+
+  /* Prevent iOS Safari 300ms touch delay and bouncy pull down while keeping smooth scrolling */
+  body {
+    min-height: 100vh;
+    min-height: 100dvh;
+    width: 100%;
+    overflow-x: hidden;
+    position: relative;
+  }
+
+  /* Smooth momentum scrolling for mobile overflow containers */
+  .overflow-x-auto, .overflow-y-auto {
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+
+  /* Prevent iOS Safari auto-zoom on form inputs when focused */
+  @media (max-width: 640px) {
+    input, select, textarea {
+      font-size: 16px !important;
+    }
+  }
+}
+
+/* Custom modern scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(51, 65, 85, 0.8);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.9);
+}
+
+/* ==========================================================================
+   COLOR THEMES SYSTEM (Emerald, Ocean, Midnight, Sunset)
+   ========================================================================== */
+
+/* Theme: Emerald (Classic Dark Slate / Emerald Green) */
+.theme-emerald {
+  --theme-bg-base: #0f172a;
+  --theme-bg-surface: #1e293b;
+  --theme-bg-card: #1e293b;
+  --theme-border: #334155;
+  --theme-accent: #10b981;
+}
+
+/* Theme: Ocean (Deep Oceanic Navy / Cyan / Sapphire) */
+.theme-ocean {
+  --theme-bg-base: #061324;
+  --theme-bg-surface: #0c213d;
+  --theme-bg-card: #0f2747;
+  --theme-border: #1a3c63;
+  --theme-accent: #0ea5e9;
+  background-color: #061324 !important;
+}
+
+.theme-ocean header,
+.theme-ocean footer {
+  background-color: #0c213d !important;
+  border-color: #1a3c63 !important;
+}
+
+.theme-ocean .bg-slate-900,
+.theme-ocean .bg-slate-950 {
+  background-color: #07172d !important;
+}
+
+.theme-ocean .bg-slate-800 {
+  background-color: #0f2747 !important;
+}
+
+.theme-ocean .bg-slate-700 {
+  background-color: #173b67 !important;
+}
+
+.theme-ocean .border-slate-700,
+.theme-ocean .border-slate-800,
+.theme-ocean .border-slate-600 {
+  border-color: #1d4574 !important;
+}
+
+/* Theme: Midnight (Ultra Dark Obsidian / Violet / Cosmic) */
+.theme-midnight {
+  --theme-bg-base: #06060e;
+  --theme-bg-surface: #0f0f21;
+  --theme-bg-card: #14142b;
+  --theme-border: #26244d;
+  --theme-accent: #8b5cf6;
+  background-color: #06060e !important;
+}
+
+.theme-midnight header,
+.theme-midnight footer {
+  background-color: #0f0f21 !important;
+  border-color: #26244d !important;
+}
+
+.theme-midnight .bg-slate-900,
+.theme-midnight .bg-slate-950 {
+  background-color: #090915 !important;
+}
+
+.theme-midnight .bg-slate-800 {
+  background-color: #14142b !important;
+}
+
+.theme-midnight .bg-slate-700 {
+  background-color: #201f41 !important;
+}
+
+.theme-midnight .border-slate-700,
+.theme-midnight .border-slate-800,
+.theme-midnight .border-slate-600 {
+  border-color: #2e2c59 !important;
+}
+
+/* Theme: Sunset (Warm Obsidian Amber / Charcoal Gold) */
+.theme-sunset {
+  --theme-bg-base: #110e0a;
+  --theme-bg-surface: #1a1610;
+  --theme-bg-card: #221c14;
+  --theme-border: #3b3020;
+  --theme-accent: #f59e0b;
+  background-color: #110e0a !important;
+}
+
+.theme-sunset header,
+.theme-sunset footer {
+  background-color: #1a1610 !important;
+  border-color: #3b3020 !important;
+}
+
+.theme-sunset .bg-slate-900,
+.theme-sunset .bg-slate-950 {
+  background-color: #120f0b !important;
+}
+
+.theme-sunset .bg-slate-800 {
+  background-color: #221c14 !important;
+}
+
+.theme-sunset .bg-slate-700 {
+  background-color: #332a1e !important;
+}
+
+.theme-sunset .border-slate-700,
+.theme-sunset .border-slate-800,
+.theme-sunset .border-slate-600 {
+  border-color: #453724 !important;
+}
